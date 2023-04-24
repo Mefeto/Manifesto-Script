@@ -1,16 +1,27 @@
+import json
 import string
 
+import openai
 import requests
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+import os
 
-# # MongoDB setup
-# client = pymongo.MongoClient()
-# db = client['manifesto-proposition']
-# collection = db['test-data']
+# MongoDB setup
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
 
+# Get env variables
+load_dotenv()
+host = os.environ.get('DB_HOST')
+openai_key = os.environ.get('OPENAI_KEY')
+openapi_key = os.environ.get('OPENAPI_KEY')
 
+# OpenAI setup
+openai.api_key = openai_key
+
+
+# detail link 통해서 컨텐츠 가져오기
 def scrape_content(url: string):
     # HTML 가져오기
     res = requests.get(url)
@@ -28,30 +39,26 @@ def scrape_content(url: string):
     return tag.text.strip()
 
 
-def format_response(proposition):
-    # 개별 발의안
-    # '': soup.BILL_ID.text,
-    # '': soup.BILL_NO.text,
-    # '': soup.BILL_NAME.text,
-    # '': soup.COMMITTEE.text,
-    # '': soup.PROPOSE_DT.text,
-    # '': soup.PROC_RESULT.text,
-    # '': soup.AGE.text,
-    # '': soup.DETAIL_LINK.text,
-    # '': detail_content,
-    # '': soup.PROPOSER.text,
-    # '': soup.MEMBER_LIST.text,
-    # '': soup.RST_PROPOSER.text,
-    # '': soup.PUBL_PROPOSER.text,
-    # '': soup.COMMITTEE_ID.text
-    return {
-        id: proposition[""]
-    }
+def get_ai_analyzed(detail: string):
+    model = "gpt-3.5-turbo"
+    messages = [
+        {"role": "system",
+         "content": '너는 어려운 내용을 쉽게 해설하는 선생님 역할을 해줘. 한국어로 제공된 국회의원 발의법률안의 제안 이유와 주요 내용을 바탕으로 문제 상황, 문제 해결 방안, 그리고 정책이나 법률 관련 어려운 단어 5개를 선별하여 JSON 형태로 응답해야돼. 미사여구는 붙이지마. JSON 구조는 다음과 같아: {"problem": 문제 상황, "solution": 문제 해결 제시 방안, "words":[{"name": 단어 명, "description": 단어 설명}]} 이제 발의법률안의 내용을 제공할 것이야.'},
+        {"role": "user", "content": detail}
+    ]
+    response = openai.ChatCompletion.create(
+        model=model,
+        messages=messages,
+        temperature=0.5,
+        max_tokens=800,
+    )
+    return response.choices[0].message.content
 
 
+# 국회 법률 발의안 요청 보내서 스크랩핑한 결과를 gpt에 돌려 받아온 결과를 db에 넣는 로직
 def send_request(index: int, size: int):
     API_URL = "https://open.assembly.go.kr/portal/openapi/nzmimeepazxkubdpn?"
-    q_key = "KEY=64a09c1b39a9417992285f2624fb3175&"
+    q_key = openapi_key
     q_type = "Type=json&"
     q_pIndex = "pIndex=%d&" % index
     q_pSize = "pSize=%d&" % size
@@ -64,42 +71,29 @@ def send_request(index: int, size: int):
     }
 
     try:
+        # 요청 보내서 발의안 목록 api 불러오기
         response = requests.post(url, headers=headers)
+
+        # 발의안 리스트를 뽑는다.
         proposal_list = response.json()["nzmimeepazxkubdpn"][1]["row"]
 
+        # 응답 코드를 추출하여 예외처리를 한다.
         code = response.json()["nzmimeepazxkubdpn"][0]["head"][1]["RESULT"]["CODE"]
-
         # INFO 200 : 해당하는 데이터가 없습니다, INFO 300 : 관리자에 의해 인증키 사용이 제한되었습니다.
         if code == "INFO-200" or code == "INFO-300":
             return None
 
-        # scrape_data = list(map(lambda x: scrape_content(x['DETAIL_LINK']), proposal_list))
-
-        """
-        call function that run gpt prompt
-        :param scrape_data, list of string 
-        :return gpt_result 
-        """
-
+        # 발의안 목록을 순회한다.
         for proposal_dict in proposal_list:
+            # 해당 발의안의 세부 링크를 스크랩핑 해온다.
             scraped_content_data = scrape_content(proposal_dict['DETAIL_LINK'])
 
             # call gpt function
+            gpt_result = get_ai_analyzed(scraped_content_data)
 
-            gpt_result = {
-                "problem": "노동위원회의 심판 기능을 전문적으로 다루는 지방노동법원으로 이관하기 위해 법률 개정이 필요하다.",
-                "solution": "차별적 처우의 시정신청에 대한 노동위원회의 시정명령 기능을 지방노동법원으로 이관하고, 관련 조사, 심문, 조정, 중재 규정, 시정명령 및 과태료 규정을 삭제한다.",
-                "words": [
-                    {"name": "지방노동법원", "description": "노동사건을 전문적으로 다루는 법원으로, 지방 법원 내에 설치된다."},
-                    {"name": "노동위원회", "description": "노동 분야의 분쟁 조정 및 노동정책에 관한 자문 역할을 하는 기관이다."},
-                    {"name": "차별적 처우", "description": "근로자에게 부당한 차별을 가하는 행위를 말한다."},
-                    {"name": "시정신청", "description": "부당한 처우를 받은 근로자가 그 처우를 바로잡기 위해 관련 기관에 요청하는 절차이다."},
-                    {"name": "시정명령", "description": "부당한 처우를 시정하도록 명령하는 권한을 가진 기관의 결정이다."}
-                ]
-            }
-
+            # update proposal info
             proposal_dict.update({'DETAIL_CONTENT': scraped_content_data})
-            proposal_dict.update({"ANALYTICS": gpt_result})
+            proposal_dict.update({"ANALYTICS": json.loads(gpt_result)})
 
         return proposal_list
 
@@ -108,7 +102,7 @@ def send_request(index: int, size: int):
 
 
 def mongo_insert_many(scraped_content):
-    uri = "mongodb+srv://ehcws333:ehcws333@manifesto.tpyq8xn.mongodb.net/?retryWrites=true&w=majority"
+    uri = host
     client = MongoClient(uri, server_api=ServerApi('1'))
     db = client['manifesto']
     try:
@@ -121,6 +115,6 @@ def mongo_insert_many(scraped_content):
 
 
 # 호출 해보기
-scraped_and_gpt_data = send_request(1, 5)
+scraped_and_gpt_data = send_request(21, 5)
 insert_many = mongo_insert_many(scraped_and_gpt_data)
-print(insert_many.inserted_ids);
+print(insert_many.inserted_ids)
